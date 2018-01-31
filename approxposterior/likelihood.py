@@ -173,14 +173,7 @@ def rosenbrock_lnlike(x):
     """
 
     x = np.array(x)
-    if x.ndim > 1:
-        x1 = x[:,0]
-        x2 = x[:,1]
-    else:
-        x1 = x[0]
-        x2 = x[1]
-
-    return -0.01*(x1 - 1.0)**2 - (x1*x1 - x2)**2
+    return -0.01*(x[:,0] - 1.0)**2 - (x[:,0]*x[:,0] - x[:,1])**2
 # end function
 
 

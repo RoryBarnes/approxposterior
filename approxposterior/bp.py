@@ -114,10 +114,11 @@ class ApproxPosterior(object):
             return -np.inf
 
         # Mean of predictive distribution conditioned on y (GP posterior estimate)
-        mu = self.gp.predict(self.y, theta_test, return_cov=False, return_var=False)
+        mu = self.gp.predict(self.g, theta_test, return_cov=False, return_var=False)
 
         # Always add flat prior to keep it in bounds
         mu += self._lnprior(theta_test)
+        mu += self.posterior(theta_test)
 
         # Catch NaNs/Infs because they can (rarely) happen
         if not np.isfinite(mu):
@@ -127,7 +128,7 @@ class ApproxPosterior(object):
     # end function
 
 
-    def run(self, theta=None, y=None, m0=20, m=10, M=10000, nmax=2, Dmax=0.1,
+    def run(self, theta=None, f=None, m0=20, m=10, M=10000, nmax=2, Dmax=0.1,
             kmax=5, sampler=None, sim_annealing=False, cv=None, seed=None,
             which_kernel="ExpSquaredKernel", bounds=None, debug=True,
             n_kl_samples=100000, verbose=True, **kw):
@@ -138,7 +139,7 @@ class ApproxPosterior(object):
         ----------
         theta : array (optional)
             Input features (n_samples x n_features).  Defaults to None.
-        y : array (optional)
+        f : array (optional)
             Input result of forward model (n_samples,). Defaults to None.
         m0 : int (optional)
             Initial number of design points.  Defaults to 20.
@@ -190,54 +191,35 @@ class ApproxPosterior(object):
         else:
             theta = np.array(theta)
 
-        if y is None:
-            y = self._lnprob(theta)
-        else:
-            y = np.array(y)
-
         # Store quantities
         self.theta = theta
-        self.y = y
+        if f is None:
+            self.f = np.exp(self._lnlike(self.theta))
+        else:
+            self.f = f
+        self.p = np.exp(np.array([self._lnprior(th) for th in self.theta])) # Initial posterior is the prior
+        self.g = np.log(self.f/self.p)
+
+        for ii in range(len(self.g)):
+            if not np.isfinite(self.g[ii]):
+                self.g[ii] = -1.0e3
 
         # Setup, optimize gaussian process XXX just using default options now
-        self.gp = gp_utils.setup_gp(self.theta, self.y, which_kernel=which_kernel)
-        self.gp = gp_utils.optimize_gp(self.gp, theta, self.y, cv=cv, seed=seed,
+        self.gp = gp_utils.setup_gp(self.theta, self.g, which_kernel=which_kernel)
+        self.gp = gp_utils.optimize_gp(self.gp, self.theta, self.g, cv=cv, seed=seed,
                                        which_kernel=which_kernel)
 
         # Main loop
         for nn in range(nmax):
 
-            # 1) Find m new points by maximizing utility function
-            for ii in range(m):
-                theta_t = ut.minimize_objective(self.utility, self.y, self.gp,
-                                                sample_fn=self.prior_sample,
-                                                prior_fn=self._lnprior,
-                                                sim_annealing=sim_annealing,
-                                                bounds=bounds, **kw)
-
-                # 2) Query oracle at new points, theta_t
-                #y_t = self._lnlike(theta_t) + self.posterior(theta_t)
-                y_t = self._lnlike(theta_t) + self._lnprior(theta_t)
-
-                # Join theta, y arrays
-                self.theta = np.concatenate([self.theta, theta_t])
-                self.y = np.concatenate([self.y, y_t])
-
-                # 3) Init new GP with new points, optimize
-                self.gp = gp_utils.setup_gp(self.theta, self.y,
-                                            which_kernel=which_kernel)
-                self.gp = gp_utils.optimize_gp(self.gp, self.theta, self.y,
-                                               cv=cv, seed=seed,
-                                               which_kernel=which_kernel)
-
             # Plot GP debug diagnostics?
             if debug:
-                fig, _ = pu.plot_gp(self.gp, self.theta, self.y,
+                fig, _ = pu.plot_gp(self.gp, self.theta, self.g,
                                     return_type="mean", log=True,
                                     save_plot="gp_mu_iter_%d.png" % nn)
                 plt.close(fig)
 
-            # GP updated: run sampler to obtain new posterior conditioned on
+            # Run MCMC sampler to obtain new posterior conditioned on
             # (theta_n, log(L_t)*p_n). Use emcee to obtain posterior
             ndim = self.theta.shape[-1]
             nwalk = 10 * ndim
@@ -262,7 +244,6 @@ class ApproxPosterior(object):
             iburn = mcmc_utils.estimate_burnin(sampler, nwalk, nsteps, ndim)
             self.iburns.append(iburn)
 
-
             # Plot mcmc posterior distributions?
             if debug:
                 if verbose:
@@ -274,8 +255,7 @@ class ApproxPosterior(object):
                 fig.savefig("posterior_%d.png" % nn)
                 plt.clf()
 
-            # Make new posterior function using a Gaussian Mixure model to
-            # approximate the posterior.
+            # Approximate posterior using a Gaussian Mixure model
             hyperparams = {"n_components" : np.array([1,2,3,4,5])}
             gmm = GridSearchCV(GaussianMixture(covariance_type="full"),
                                hyperparams, cv=5)
@@ -315,7 +295,7 @@ class ApproxPosterior(object):
 
             # Update posterior estimate
             self.prev_posterior = self.posterior
-            self.posterior = GMM.score_samples
+            #self.posterior = GMM.score_samples
 
             # Estimate KL-divergence between previous and current posterior
             # Only do this after the 1st (0th) iteration!
@@ -329,3 +309,32 @@ class ApproxPosterior(object):
                                                self.posterior))
             else:
                 self.Dkl.append(0.0)
+
+            # 1) Find m new points by maximizing utility function
+            for ii in range(m):
+                theta_t = ut.minimize_objective(self.utility, self.g, self.gp,
+                                                sample_fn=self.prior_sample,
+                                                prior_fn=self._lnprior,
+                                                sim_annealing=sim_annealing,
+                                                bounds=bounds, **kw)
+
+                # Select m new design points
+                f_t = np.exp(self._lnlike(theta_t) + self._lnprior(theta_t))
+                p_t = np.exp(np.array([self.posterior(theta_t)])).reshape(1,) # Initial posterior is the prior
+                g_t = np.log(f_t/p_t)
+
+                if not np.isfinite(g_t):
+                    g_t = [-1.0e3]
+
+                # Join theta, y arrays
+                self.theta = np.concatenate([self.theta, theta_t])
+                self.f = np.concatenate([self.f, f_t])
+                self.p = np.concatenate([self.p, p_t])
+                self.g = np.concatenate([self.g, g_t])
+
+                # Init new GP with new points, optimize
+                self.gp = gp_utils.setup_gp(self.theta, self.g,
+                                            which_kernel=which_kernel)
+                self.gp = gp_utils.optimize_gp(self.gp, self.theta, self.g,
+                                               cv=cv, seed=seed,
+                                               which_kernel=which_kernel)

@@ -35,4 +35,4 @@ agp = bp.ApproxPosterior(lnprior=lh.rosenbrock_lnprior,
 # Run!
 agp.run(m0=m0, m=m, M=M, nmax=nmax, Dmax=Dmax, kmax=kmax, cv=cv,
         sampler=None, bounds=bounds, which_kernel=which_kernel,
-        n_kl_samples=100000, verbose=False, debug=True)
+        n_kl_samples=100000, verbose=True, debug=True)
